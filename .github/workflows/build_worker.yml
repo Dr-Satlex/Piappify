@@ -18,8 +18,8 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25   # MUST match WORKFLOW_TIMEOUT_MIN in app.py
+    runs-on: ubuntu-24.04   # PINNED (was ubuntu-latest): noble is the Ubuntu we test the package list against
+    timeout-minutes: 25     # MUST match WORKFLOW_TIMEOUT_MIN in app.py
 
     steps:
       - name: Clone Target Repo (Depth 1)
@@ -54,9 +54,10 @@ jobs:
       - name: Install Buildozer & System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git zip unzip python3-pip autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 cmake libffi-dev libssl-dev
-          # Pinned as ONE tested set (spec §8): bump buildozer+cython+SDK together, only after a green test build
-          pip3 install buildozer==1.6.0 cython==0.29.33
+          # Ubuntu 24.04 (noble) removed libtinfo5 (ships libtinfo6, preinstalled) - deliberately absent
+          sudo apt-get install -y git zip unzip python3-pip autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev cmake libffi-dev libssl-dev
+          # noble's system Python is PEP 668 externally-managed; safe on an ephemeral runner
+          pip3 install --break-system-packages buildozer==1.6.0 cython==0.29.33
 
       - name: Patch buildozer.spec (Strict Algorithm)
         run: |
@@ -64,7 +65,7 @@ jobs:
           if [ ! -f buildozer.spec ]; then buildozer init; fi
           cat << 'EOF' > patch.py
           import re, sys
-          # Keys we OWN and overwrite (spec §5)
+          # Keys we OWN and overwrite (spec section 5)
           PATCH_KEYS = {
               "title":          re.compile(r"^(\s*)title(\s*=\s*).*$"),
               "package.name":   re.compile(r"^(\s*)package\.name(\s*=\s*).*$"),
