@@ -18,7 +18,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04   # PINNED: noble is the Ubuntu we test the package list against
+    runs-on: ubuntu-24.04   # PINNED (was ubuntu-latest): noble is the Ubuntu we test the package list against
     timeout-minutes: 25     # MUST match WORKFLOW_TIMEOUT_MIN in app.py
 
     steps:
@@ -51,8 +51,14 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Pre-accept Android SDK licenses
-        run: yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
+      - name: Install libtinfo5 (needed by Buildozer's Android toolchain, gone from noble's repos)
+        run: |
+          # Ubuntu 24.04 dropped libtinfo5 from its own package index, but Buildozer's
+          # android build step still apt-get installs it internally. Pull the .deb
+          # straight from the jammy (22.04) security archive and install it manually
+          # so that apt-get install libtinfo5 (run later, by Buildozer itself) is a no-op.
+          wget -q http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb
+          sudo apt-get install -y ./libtinfo5_6.3-2ubuntu0.1_amd64.deb
 
       - name: Install Buildozer & System Dependencies
         run: |
@@ -68,42 +74,16 @@ jobs:
           if [ ! -f buildozer.spec ]; then buildozer init; fi
           cat << 'EOF' > patch.py
           import re, sys
-          # Keys we OWN and overwrite in [app] (spec section 5)
+          # Keys we OWN and overwrite (spec section 5)
           PATCH_KEYS = {
               "title":          re.compile(r"^(\s*)title(\s*=\s*).*$"),
               "package.name":   re.compile(r"^(\s*)package\.name(\s*=\s*).*$"),
               "package.domain": re.compile(r"^(\s*)package\.domain(\s*=\s*).*$"),
           }
-          # Keys we only ENSURE exist in [app] (insert default if absent; NEVER overwrite)
+          # Keys we only ENSURE exist (insert default if absent; NEVER overwrite author's value)
           ENSURE_KEYS = {
               "requirements": ("python3,kivy", re.compile(r"^(\s*)requirements(\s*=\s*).*$")),
           }
-          # CI-environment keys we FORCE in [buildozer]: an author's local SDK path can never
-          # exist on an ephemeral runner, so overriding it is the only correct behavior here.
-          FORCE_BUILDOZER_KEYS = {
-              "android.sdk_path": "/usr/local/lib/android/sdk",
-          }
-
-          def set_buildozer_keys(lines, values):
-              for key, value in values.items():
-                  pat = re.compile(r"^(\s*)" + re.escape(key) + r"(\s*=\s*).*$")
-                  replaced = False
-                  for i, l in enumerate(lines):
-                      if l.lstrip().startswith("#"): continue
-                      m = pat.match(l)
-                      if m:
-                          lines[i] = f"{m.group(1)}{key}{m.group(2)}{value}\n"
-                          replaced = True
-                  if not replaced:
-                      idx = None
-                      for i, l in enumerate(lines):
-                          if l.strip() == "[buildozer]":
-                              idx = i
-                      if idx is not None:
-                          lines.insert(idx + 1, f"{key} = {value}\n")
-                      else:
-                          lines.extend(["\n[buildozer]\n", f"{key} = {value}\n"])
-              return lines
 
           def patch_spec(text, title, package_name):
               domain, _, name = package_name.rpartition(".")
@@ -135,7 +115,6 @@ jobs:
                               lines.insert(at, f"{key} = {allvals[key]}\n")
                               at += 1
                           break
-              lines = set_buildozer_keys(lines, FORCE_BUILDOZER_KEYS)
               return "".join(lines)
 
           with open('buildozer.spec', 'r') as f: text = f.read()
