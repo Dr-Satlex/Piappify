@@ -53,12 +53,24 @@ jobs:
 
       - name: Install libtinfo5 (needed by Buildozer's Android toolchain, gone from noble's repos)
         run: |
+          set -euo pipefail
           # Ubuntu 24.04 dropped libtinfo5 from its own package index, but Buildozer's
-          # android build step still apt-get installs it internally. Pull the .deb
-          # straight from the jammy (22.04) security archive and install it manually
-          # so that apt-get install libtinfo5 (run later, by Buildozer itself) is a no-op.
-          wget -q http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb
-          sudo apt-get install -y ./libtinfo5_6.3-2ubuntu0.1_amd64.deb
+          # android build step still apt-get installs it internally. Pull the .deb from
+          # the jammy (22.04) security archive and install it manually so that
+          # apt-get install libtinfo5 (run later, by Buildozer itself) is a no-op.
+          #
+          # The exact filename changes whenever Canonical ships a security rebuild
+          # (e.g. 6.3-2ubuntu0.1 -> 6.3-2ubuntu0.2), so resolve it from the pool's
+          # directory listing instead of hardcoding a version that will eventually 404.
+          BASE="https://security.ubuntu.com/ubuntu/pool/universe/n/ncurses"
+          DEB=$(curl -fsSL "$BASE/" | grep -oE 'libtinfo5_[^"]+_amd64\.deb' | sort -V | tail -n1)
+          if [ -z "$DEB" ]; then
+            echo "::error::Could not resolve a libtinfo5 .deb from $BASE"
+            exit 1
+          fi
+          echo "Resolved package: $DEB"
+          wget -q "$BASE/$DEB"
+          sudo apt-get install -y "./$DEB"
 
       - name: Install Buildozer & System Dependencies
         run: |
