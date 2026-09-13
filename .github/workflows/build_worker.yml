@@ -18,8 +18,8 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04   # PINNED (was ubuntu-latest): noble is the Ubuntu we test the package list against
-    timeout-minutes: 25     # MUST match WORKFLOW_TIMEOUT_MIN in app.py
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
 
     steps:
       - name: Clone Target Repo (Depth 1)
@@ -48,21 +48,9 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      # NOTE: deliberately NO android-actions/setup-android here.
-      # Buildozer/p4a provision their own SDK + NDK (r28c); a preinstalled
-      # SDK on the runner image only creates dual-NDK ambiguity.
-
       - name: Install libtinfo5 (needed by Buildozer's Android toolchain, gone from noble's repos)
         run: |
           set -euo pipefail
-          # Ubuntu 24.04 dropped libtinfo5 from its own package index, but Buildozer's
-          # android build step still apt-get installs it internally. Pull the .deb from
-          # the jammy (22.04) security archive and install it manually so that
-          # apt-get install libtinfo5 (run later, by Buildozer itself) is a no-op.
-          #
-          # The exact filename changes whenever Canonical ships a security rebuild
-          # (e.g. 6.3-2ubuntu0.1 -> 6.3-2ubuntu0.2), so resolve it from the pool's
-          # directory listing instead of hardcoding a version that will eventually 404.
           BASE="https://security.ubuntu.com/ubuntu/pool/universe/n/ncurses"
           DEB=$(curl -fsSL "$BASE/" | grep -oE 'libtinfo5_[^"]+_amd64\.deb' | sort -V | tail -n1)
           if [ -z "$DEB" ]; then
@@ -76,13 +64,16 @@ jobs:
       - name: Install Buildozer & System Dependencies
         run: |
           sudo apt-get update
-          # noble ships libtinfo6 (libtinfo5 handled in the step above - deliberately absent here).
-          # python3-dev + stdlib headers are required by p4a's hostpython3 compile on noble.
-          sudo apt-get install -y git zip unzip python3-pip python3-dev python3-setuptools \
-            autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev \
-            cmake libffi-dev libssl-dev libsqlite3-dev libbz2-dev liblzma-dev
+          # Aligned strictly with official Buildozer docs for Ubuntu 24.04.
+          # Added libltdl-dev and libtool-bin which provide the libtool.m4 macros
+          # required by autoreconf when python-for-android builds the libffi recipe.
+          # Added automake, autopoint, gettext, build-essential for the same reason.
+          sudo apt-get install -y git zip unzip python3-pip python3-dev python3-virtualenv python3-setuptools \
+            build-essential autoconf libtool libtool-bin pkg-config zlib1g-dev \
+            libncurses5-dev libncursesw5-dev libtinfo6 cmake libffi-dev \
+            libssl-dev automake autopoint gettext libltdl-dev
+          
           # noble's system Python is PEP 668 externally-managed; safe on an ephemeral runner.
-          # buildozer 1.6.0 == current stable; cython 0.29.33 matches p4a's kivy recipe.
           pip3 install --break-system-packages buildozer==1.6.0 cython==0.29.33
 
       - name: Patch buildozer.spec (Strict Algorithm)
@@ -92,16 +83,12 @@ jobs:
           cat << 'EOF' > patch.py
           import re, sys
 
-          # Keys we OWN and OVERWRITE (every uncommented occurrence, so a stray
-          # duplicate later in the file can't win under configparser's last-wins rule)
           PATCH_KEYS = {
               "title":          re.compile(r"^(\s*)title(\s*=\s*).*$"),
               "package.name":   re.compile(r"^(\s*)package\.name(\s*=\s*).*$"),
               "package.domain": re.compile(r"^(\s*)package\.domain(\s*=\s*).*$"),
               "android.accept_sdk_license": re.compile(r"^(\s*)android\.accept_sdk_license(\s*=\s*).*$"),
           }
-          # Keys we only ENSURE exist (insert default if absent or commented out;
-          # NEVER overwrite the author's value for keys not in PATCH_KEYS)
           ENSURE_KEYS = {
               "requirements": ("python3,kivy", re.compile(r"^(\s*)requirements(\s*=\s*).*$")),
               "android.accept_sdk_license": ("True", re.compile(r"^(\s*)android\.accept_sdk_license(\s*=\s*).*$")),
@@ -152,15 +139,10 @@ jobs:
               f.write(patched)
           EOF
           python3 patch.py "${{ github.event.inputs.app_name }}" "${{ github.event.inputs.package_name }}"
-          echo "--- patched spec ([app] head, for the log) ---"
-          sed -n '1,25p' buildozer.spec
 
       - name: Execute Buildozer
         run: |
           cd source
-          # 'yes |' auto-answers any stray interactive prompt (sdkmanager license etc.).
-          # tee keeps a copy of the log so the failure excerpt below can grep it.
-          # PIPESTATUS: [0]=yes, [1]=buildozer, [2]=tee -> we need [1].
           yes | buildozer -v android debug 2>&1 | tee build.log
           status=${PIPESTATUS[1]}
           if [ "$status" -ne 0 ]; then
