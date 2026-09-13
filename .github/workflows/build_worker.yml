@@ -19,59 +19,91 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    
+    timeout-minutes: 25   # MUST match WORKFLOW_TIMEOUT_MIN in app.py
+
     steps:
+      - name: Clone Target Repo (Depth 1)
+        run: git clone --depth 1 ${{ github.event.inputs.repo_url }} source
+
+      - name: Validate Project Structure (fail fast)
+        run: |
+          cd source
+          if [ ! -f main.py ] && [ ! -f buildozer.spec ]; then
+            echo "::error::Not a Buildozer-compatible project: no main.py and no buildozer.spec found"
+            exit 1
+          fi
+          echo "Project structure OK"
+
+      - name: Reject Flet projects (typed, fast)
+        run: |
+          cd source
+          if grep -qE "^(import|from)[[:space:]]+flet" main.py 2>/dev/null || grep -qi "^flet" requirements.txt 2>/dev/null; then
+            echo "::error::Flet detected. Flet apps must be built with 'flet build apk', not Buildozer. Kivy/KivyMD only for now."
+            exit 1
+          fi
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
-          
+
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
-        
+
       - name: Install Buildozer & System Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y git zip unzip python3-pip autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 cmake libffi-dev libssl-dev
-          pip3 install --upgrade buildozer cython
-          
-      - name: Clone Target Repo (Depth 1)
-        run: git clone --depth 1 ${{ github.event.inputs.repo_url }} source
-        
+          # Pinned as ONE tested set (spec §8): bump buildozer+cython+SDK together, only after a green test build
+          pip3 install buildozer==1.6.0 cython==0.29.33
+
       - name: Patch buildozer.spec (Strict Algorithm)
         run: |
           cd source
           if [ ! -f buildozer.spec ]; then buildozer init; fi
           cat << 'EOF' > patch.py
           import re, sys
+          # Keys we OWN and overwrite (spec §5)
+          PATCH_KEYS = {
+              "title":          re.compile(r"^(\s*)title(\s*=\s*).*$"),
+              "package.name":   re.compile(r"^(\s*)package\.name(\s*=\s*).*$"),
+              "package.domain": re.compile(r"^(\s*)package\.domain(\s*=\s*).*$"),
+          }
+          # Keys we only ENSURE exist (insert default if absent; NEVER overwrite author's value)
+          ENSURE_KEYS = {
+              "requirements": ("python3,kivy", re.compile(r"^(\s*)requirements(\s*=\s*).*$")),
+          }
+
           def patch_spec(text, title, package_name):
-              KEY_PATTERNS = {
-                  "title":          re.compile(r"^(\s*)title(\s*=\s*).*$"),
-                  "package.name":   re.compile(r"^(\s*)package\.name(\s*=\s*).*$"),
-                  "package.domain": re.compile(r"^(\s*)package\.domain(\s*=\s*).*$"),
-              }
               domain, _, name = package_name.rpartition(".")
               values = {"title": title, "package.name": name, "package.domain": domain}
               lines = text.splitlines(keepends=True)
               found = set()
               for i, line in enumerate(lines):
                   if line.lstrip().startswith("#"): continue
-                  for key, pattern in KEY_PATTERNS.items():
+                  for key, pat in PATCH_KEYS.items():
                       if key in found: continue
-                      m = pattern.match(line)
+                      m = pat.match(line)
                       if m:
                           lines[i] = f"{m.group(1)}{key}{m.group(2)}{values[key]}\n"
                           found.add(key)
-              missing = set(KEY_PATTERNS) - found
+              for key, (_, pat) in ENSURE_KEYS.items():
+                  for line in lines:
+                      if line.lstrip().startswith("#"): continue
+                      if pat.match(line):
+                          found.add(key)
+                          break
+              missing = (set(PATCH_KEYS) | set(ENSURE_KEYS)) - found
               if missing:
+                  allvals = dict(values)
+                  allvals.update({k: v for k, (v, _) in ENSURE_KEYS.items()})
                   for i, line in enumerate(lines):
                       if line.strip() == "[app]":
-                          insert_at = i + 1
-                          for key in missing:
-                              lines.insert(insert_at, f"{key} = {values[key]}\n")
-                              insert_at += 1
+                          at = i + 1
+                          for key in sorted(missing):
+                              lines.insert(at, f"{key} = {allvals[key]}\n")
+                              at += 1
                           break
               return "".join(lines)
 
@@ -80,23 +112,23 @@ jobs:
           with open('buildozer.spec', 'w') as f: f.write(patched)
           EOF
           python3 patch.py "${{ github.event.inputs.app_name }}" "${{ github.event.inputs.package_name }}"
-          
+
       - name: Execute Buildozer
         run: |
           cd source
           buildozer -v android debug
-          
+
       - name: Package APK Artifact
         run: |
           cd source
           APK_PATH=$(find . -name "*.apk" -type f | head -n 1)
-          if [ -z "$APK_PATH" ]; then 
+          if [ -z "$APK_PATH" ]; then
             echo "::error::No APK found after build success"
-            exit 1 
+            exit 1
           fi
           mkdir -p artifacts
           cp $APK_PATH artifacts/app-${{ github.event.inputs.build_id }}.apk
-          
+
       - name: Upload Artifact to GitHub
         uses: actions/upload-artifact@v4
         with:
