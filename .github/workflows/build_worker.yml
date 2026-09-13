@@ -1,0 +1,105 @@
+name: APK Builder Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_url:
+        description: 'Target GitHub Repo URL'
+        required: true
+      app_name:
+        description: 'App Name'
+        required: true
+      package_name:
+        description: 'Package Name'
+        required: true
+      build_id:
+        description: 'Unique Build ID'
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    
+    steps:
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        
+      - name: Install Buildozer & System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git zip unzip python3-pip autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 cmake libffi-dev libssl-dev
+          pip3 install --upgrade buildozer cython
+          
+      - name: Clone Target Repo (Depth 1)
+        run: git clone --depth 1 ${{ github.event.inputs.repo_url }} source
+        
+      - name: Patch buildozer.spec (Strict Algorithm)
+        run: |
+          cd source
+          if [ ! -f buildozer.spec ]; then buildozer init; fi
+          cat << 'EOF' > patch.py
+          import re, sys
+          def patch_spec(text, title, package_name):
+              KEY_PATTERNS = {
+                  "title":          re.compile(r"^(\s*)title(\s*=\s*).*$"),
+                  "package.name":   re.compile(r"^(\s*)package\.name(\s*=\s*).*$"),
+                  "package.domain": re.compile(r"^(\s*)package\.domain(\s*=\s*).*$"),
+              }
+              domain, _, name = package_name.rpartition(".")
+              values = {"title": title, "package.name": name, "package.domain": domain}
+              lines = text.splitlines(keepends=True)
+              found = set()
+              for i, line in enumerate(lines):
+                  if line.lstrip().startswith("#"): continue
+                  for key, pattern in KEY_PATTERNS.items():
+                      if key in found: continue
+                      m = pattern.match(line)
+                      if m:
+                          lines[i] = f"{m.group(1)}{key}{m.group(2)}{values[key]}\n"
+                          found.add(key)
+              missing = set(KEY_PATTERNS) - found
+              if missing:
+                  for i, line in enumerate(lines):
+                      if line.strip() == "[app]":
+                          insert_at = i + 1
+                          for key in missing:
+                              lines.insert(insert_at, f"{key} = {values[key]}\n")
+                              insert_at += 1
+                          break
+              return "".join(lines)
+
+          with open('buildozer.spec', 'r') as f: text = f.read()
+          patched = patch_spec(text, sys.argv[1], sys.argv[2])
+          with open('buildozer.spec', 'w') as f: f.write(patched)
+          EOF
+          python3 patch.py "${{ github.event.inputs.app_name }}" "${{ github.event.inputs.package_name }}"
+          
+      - name: Execute Buildozer
+        run: |
+          cd source
+          buildozer -v android debug
+          
+      - name: Package APK Artifact
+        run: |
+          cd source
+          APK_PATH=$(find . -name "*.apk" -type f | head -n 1)
+          if [ -z "$APK_PATH" ]; then 
+            echo "::error::No APK found after build success"
+            exit 1 
+          fi
+          mkdir -p artifacts
+          cp $APK_PATH artifacts/app-${{ github.event.inputs.build_id }}.apk
+          
+      - name: Upload Artifact to GitHub
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ github.event.inputs.build_id }}
+          path: source/artifacts/*.apk
+          retention-days: 1
