@@ -11,8 +11,8 @@ PACKAGE_NAME_REGEX = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
 
 # --- Configuration ---
 # IMPORTANT: Update these to match your GitHub username and repository name
-BUILDER_REPO_OWNER = "YOUR_GITHUB_USERNAME" 
-BUILDER_REPO_NAME = "android-cloud-compiler"
+BUILDER_REPO_OWNER = "Dr-Satlex" 
+BUILDER_REPO_NAME = "Piappify"
 
 def main():
     st.set_page_config(page_title="Cloud APK Builder", layout="wide")
