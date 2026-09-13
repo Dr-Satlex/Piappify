@@ -18,8 +18,8 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04   # PINNED (was ubuntu-latest): noble is the Ubuntu we test the package list against
-    timeout-minutes: 25     # MUST match WORKFLOW_TIMEOUT_MIN in app.py
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
 
     steps:
       - name: Clone Target Repo (Depth 1)
@@ -48,20 +48,12 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      # REMOVED: android-actions/setup-android@v3
+      # Reason: Let Buildozer manage its own SDK/NDK to prevent path conflicts.
 
-      - name: Install libtinfo5 (needed by Buildozer's Android toolchain, gone from noble's repos)
+      - name: Install libtinfo5 (needed by Buildozer's Android toolchain)
         run: |
           set -euo pipefail
-          # Ubuntu 24.04 dropped libtinfo5 from its own package index, but Buildozer's
-          # android build step still apt-get installs it internally. Pull the .deb from
-          # the jammy (22.04) security archive and install it manually so that
-          # apt-get install libtinfo5 (run later, by Buildozer itself) is a no-op.
-          #
-          # The exact filename changes whenever Canonical ships a security rebuild
-          # (e.g. 6.3-2ubuntu0.1 -> 6.3-2ubuntu0.2), so resolve it from the pool's
-          # directory listing instead of hardcoding a version that will eventually 404.
           BASE="https://security.ubuntu.com/ubuntu/pool/universe/n/ncurses"
           DEB=$(curl -fsSL "$BASE/" | grep -oE 'libtinfo5_[^"]+_amd64\.deb' | sort -V | tail -n1)
           if [ -z "$DEB" ]; then
@@ -75,10 +67,13 @@ jobs:
       - name: Install Buildozer & System Dependencies
         run: |
           sudo apt-get update
-          # Ubuntu 24.04 (noble) removed libtinfo5 (ships libtinfo6, preinstalled) - deliberately absent
-          sudo apt-get install -y git zip unzip python3-pip autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev cmake libffi-dev libssl-dev
-          # noble's system Python is PEP 668 externally-managed; safe on an ephemeral runner
-          pip3 install --break-system-packages buildozer==1.6.0 cython==0.29.33
+          # ADDED: python3-dev (Required for python-for-android to compile hostpython)
+          # ADDED: libsqlite3-dev (Often required by standard library modules)
+          sudo apt-get install -y git zip unzip python3-pip python3-dev autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev cmake libffi-dev libssl-dev libsqlite3-dev
+          
+          # UPDATED: Removed strict pins on buildozer/cython. 
+          # Modern python-for-android requires modern cython and buildozer to work with NDK r25+.
+          pip3 install --break-system-packages buildozer cython
 
       - name: Patch buildozer.spec (Strict Algorithm)
         run: |
@@ -86,13 +81,11 @@ jobs:
           if [ ! -f buildozer.spec ]; then buildozer init; fi
           cat << 'EOF' > patch.py
           import re, sys
-          # Keys we OWN and overwrite (spec section 5)
           PATCH_KEYS = {
               "title":          re.compile(r"^(\s*)title(\s*=\s*).*$"),
               "package.name":   re.compile(r"^(\s*)package\.name(\s*=\s*).*$"),
               "package.domain": re.compile(r"^(\s*)package\.domain(\s*=\s*).*$"),
           }
-          # Keys we only ENSURE exist (insert default if absent; NEVER overwrite author's value)
           ENSURE_KEYS = {
               "requirements": ("python3,kivy", re.compile(r"^(\s*)requirements(\s*=\s*).*$")),
           }
@@ -136,8 +129,12 @@ jobs:
           python3 patch.py "${{ github.event.inputs.app_name }}" "${{ github.event.inputs.package_name }}"
 
       - name: Execute Buildozer
+        env:
+          # Force Buildozer to output everything so we can see the real error
+          BUILDOZER_LOG_LEVEL: 2
         run: |
           cd source
+          # Using log_level=2 to expose the hidden C/Python compilation errors
           buildozer -v android debug
 
       - name: Package APK Artifact
