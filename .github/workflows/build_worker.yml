@@ -48,7 +48,7 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Install libtinfo5 (needed by Buildozer's Android toolchain, gone from noble's repos)
+      - name: Install libtinfo5 (needed by Buildozer's Android toolchain)
         run: |
           set -euo pipefail
           BASE="https://security.ubuntu.com/ubuntu/pool/universe/n/ncurses"
@@ -64,17 +64,16 @@ jobs:
       - name: Install Buildozer & System Dependencies
         run: |
           sudo apt-get update
-          # Aligned strictly with official Buildozer docs for Ubuntu 24.04.
-          # Added libltdl-dev and libtool-bin which provide the libtool.m4 macros
-          # required by autoreconf when python-for-android builds the libffi recipe.
-          # Added automake, autopoint, gettext, build-essential for the same reason.
+          # Added libltdl-dev, libtool-bin, automake, autopoint, gettext to fix
+          # the 'possibly undefined macro: LT_SYS_SYMBOL_USCORE' error during
+          # the libffi recipe's autoreconf step.
           sudo apt-get install -y git zip unzip python3-pip python3-dev python3-virtualenv python3-setuptools \
             build-essential autoconf libtool libtool-bin pkg-config zlib1g-dev \
             libncurses5-dev libncursesw5-dev libtinfo6 cmake libffi-dev \
             libssl-dev automake autopoint gettext libltdl-dev
           
-          # noble's system Python is PEP 668 externally-managed; safe on an ephemeral runner.
-          pip3 install --break-system-packages buildozer==1.6.0 cython==0.29.33
+          # Cython 0.29.34 is recommended for modern p4a/kivy builds.
+          pip3 install --break-system-packages buildozer==1.6.0 cython==0.29.34
 
       - name: Patch buildozer.spec (Strict Algorithm)
         run: |
@@ -88,10 +87,12 @@ jobs:
               "package.name":   re.compile(r"^(\s*)package\.name(\s*=\s*).*$"),
               "package.domain": re.compile(r"^(\s*)package\.domain(\s*=\s*).*$"),
               "android.accept_sdk_license": re.compile(r"^(\s*)android\.accept_sdk_license(\s*=\s*).*$"),
+              "p4a.branch":     re.compile(r"^(\s*)p4a\.branch(\s*=\s*).*$"),
           }
           ENSURE_KEYS = {
               "requirements": ("python3,kivy", re.compile(r"^(\s*)requirements(\s*=\s*).*$")),
               "android.accept_sdk_license": ("True", re.compile(r"^(\s*)android\.accept_sdk_license(\s*=\s*).*$")),
+              "p4a.branch": ("develop", re.compile(r"^(\s*)p4a\.branch(\s*=\s*).*$")),
           }
 
           def patch_spec(text, title, package_name):
@@ -101,6 +102,7 @@ jobs:
                   "package.name": name,
                   "package.domain": domain,
                   "android.accept_sdk_license": "True",
+                  "p4a.branch": "develop", # Forces the fix for Python 3.14 venv corruption
               }
               lines = text.splitlines(keepends=True)
               found = set()
@@ -143,6 +145,8 @@ jobs:
       - name: Execute Buildozer
         run: |
           cd source
+          # 'yes |' auto-answers sdkmanager license prompts.
+          # tee saves the log for the failure excerpt below.
           yes | buildozer -v android debug 2>&1 | tee build.log
           status=${PIPESTATUS[1]}
           if [ "$status" -ne 0 ]; then
